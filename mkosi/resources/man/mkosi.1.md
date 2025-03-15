@@ -293,6 +293,12 @@ Those settings cannot be configured in the configuration files.
 `--wipe-build-dir`, `-w`
 :   Wipe the build directory if one is configured before building the image.
 
+`--rerun-build-scripts`, `-R`
+:   Rerun build scripts. Requires the `Incremental=` option to be
+    enabled and the image to have been built once already. If `History=`
+    is enabled, the config from the previous build will be reused and no
+    new history will be written.
+
 ## Supported output formats
 
 The following output formats are supported:
@@ -326,9 +332,9 @@ grouped by section below.
 Configuration is parsed in the following order:
 
 * The command line arguments are parsed.
-* `mkosi.local.conf` or `mkosi.local` is parsed if it exists. This file or
-  directory should be in `.gitignore` (or equivalent) and is intended for local
-  configuration.
+* `mkosi.local.conf` and `mkosi.local/` are parsed if they exists (in that order).
+  This file and directory should be in `.gitignore` (or equivalent)
+  and are intended for local configuration.
 * Any default paths (depending on the option) are configured if the
   corresponding path exists.
 * `mkosi.conf` is parsed if it exists in the directory configured with
@@ -346,7 +352,7 @@ Note that settings configured via the command line always override
 settings configured via configuration files. If the same setting is
 configured more than once via configuration files, later assignments
 override earlier assignments except for settings that take a collection
-of values. Also, settings read from `mkosi.local` or `mkosi.local.conf` will
+of values. Also, settings read from `mkosi.local.conf` or `mkosi.local/` will
 override settings from configuration files that are parsed later, but not
 settings specified on the CLI.
 
@@ -1022,6 +1028,7 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
     disabled.
 
     The `lvm` profile enables support for LVM.
+    The `raid` profile enables support for RAID arrays.
 
 `InitrdPackages=`, `--initrd-package=`
 :   Extra packages to install into the default initrd. Takes a comma
@@ -1551,11 +1558,14 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
     up in the generated XFS filesystem.
 
 `History=`, `--history=`
-:   Takes a boolean. If enabled, **mkosi** will write information about the
-    latest build to the `.mkosi-private` subdirectory in the directory
-    from which it was invoked. This information is then used to restore
-    the config of the latest build when running any verb that needs a
-    build without specifying `--force`.
+:   Takes a boolean. If enabled, **mkosi** will write information about
+    the latest build to the `.mkosi-private` subdirectory in the
+    directory from which it was invoked. This information is then used
+    to restore the config of the latest build when running any verb that
+    needs a build without specifying `--force`.
+
+    Note that configure scripts will not be executed if we reuse the
+    history from a previous build.
 
     To give an example of why this is useful, if you run
     `mkosi -O my-custom-output-dir -f` followed by `mkosi vm`, **mkosi**
@@ -1781,18 +1791,23 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 
 `Drives=`, `--drive=`
 :   Add a drive. Takes a colon-delimited string of format
-    `<id>:<size>[:<directory>[:<options>[:<file-id>]]]`. `id` specifies
+    `<id>:<size>[:<directory>[:<options>[:<file-id>[:<persist>]]]]`. `id` specifies
     the ID assigned to the drive. This can be used as the `drive=`
     property in various **qemu** devices. `size` specifies the size of the
     drive. This takes a size in bytes. Additionally, the suffixes `K`, `M`
     and `G` can be used to specify a size in kilobytes, megabytes and
     gigabytes respectively. `directory` optionally specifies the directory
-    in which to create the file backing the drive. `options` optionally
-    specifies extra comma-delimited properties which are passed verbatim
+    in which to create the file backing the drive. If unset, the file will be created under `/var/tmp`.
+    `options` optionally specifies extra comma-delimited properties which are passed verbatim
     to **qemu**'s `-blockdev` option. `file-id` specifies the ID of the file
-    backing the drive. Drives with the same file ID will share the
-    backing file. The directory and size of the file will be determined
-    from the first drive with a given file ID.
+    backing the drive. If unset, this defaults to the drive ID.
+    Drives with the same file ID will share the backing file.
+    The directory and size of the file will be determined from the first drive with a given file ID.
+    `persist` takes a boolean value and determines whether the drive will be persisted across **qemu** invocations.
+    Enabling persistence also prevents suffixing the filename with a random string.
+    The file backing the drive will always be available under `/<directory>/mkosi-drive-<file-id>`
+    You can skip values by setting them to the empty string, specifying e.g. `myfs:1G::::yes`
+    will create a persistent drive under `/var/tmp/mkosi-drive-myfs`.
 
     **Example usage:**
 

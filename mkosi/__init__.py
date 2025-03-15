@@ -87,7 +87,12 @@ from mkosi.installer import clean_package_manager_metadata
 from mkosi.kmod import gen_required_kernel_modules, loaded_modules, process_kernel_modules
 from mkosi.log import ARG_DEBUG, complete_step, die, log_notice, log_step
 from mkosi.manifest import Manifest
-from mkosi.mounts import finalize_certificate_mounts, finalize_source_mounts, mount_overlay
+from mkosi.mounts import (
+    finalize_certificate_mounts,
+    finalize_source_mounts,
+    finalize_volatile_tmpdir,
+    mount_overlay,
+)
 from mkosi.pager import page
 from mkosi.partition import Partition, finalize_root, finalize_roothash
 from mkosi.qemu import (
@@ -114,6 +119,7 @@ from mkosi.run import (
     workdir,
 )
 from mkosi.sandbox import (
+    CAP_SYS_ADMIN,
     CLONE_NEWNS,
     MOUNT_ATTR_NODEV,
     MOUNT_ATTR_NOEXEC,
@@ -123,6 +129,7 @@ from mkosi.sandbox import (
     MS_SLAVE,
     __version__,
     acquire_privileges,
+    have_effective_cap,
     join_new_session_keyring,
     mount,
     mount_rbind,
@@ -239,7 +246,9 @@ def install_distribution(context: Context) -> None:
             return
 
         with complete_step(f"Installing extra packages for {context.config.distribution.pretty_name()}"):
-            context.config.distribution.install_packages(context, context.config.packages)
+            context.config.distribution.package_manager(context.config).install(
+                context, context.config.packages
+            )
     else:
         if context.config.overlay or context.config.output_format.is_extension_image():
             if context.config.packages:
@@ -278,7 +287,9 @@ def install_distribution(context: Context) -> None:
                 (context.root / "boot/loader/entries.srel").write_text("type1\n")
 
             if context.config.packages:
-                context.config.distribution.install_packages(context, context.config.packages)
+                context.config.distribution.package_manager(context.config).install(
+                    context, context.config.packages
+                )
 
     for f in (
         "var/lib/systemd/random-seed",
@@ -300,7 +311,9 @@ def install_build_packages(context: Context) -> None:
         complete_step(f"Installing build packages for {context.config.distribution.pretty_name()}"),
         setup_build_overlay(context),
     ):
-        context.config.distribution.install_packages(context, context.config.build_packages)
+        context.config.distribution.package_manager(context.config).install(
+            context, context.config.build_packages
+        )
 
 
 def install_volatile_packages(context: Context) -> None:
@@ -308,7 +321,9 @@ def install_volatile_packages(context: Context) -> None:
         return
 
     with complete_step(f"Installing volatile packages for {context.config.distribution.pretty_name()}"):
-        context.config.distribution.install_packages(context, context.config.volatile_packages)
+        context.config.distribution.package_manager(context.config).install(
+            context, context.config.volatile_packages
+        )
 
 
 def remove_packages(context: Context) -> None:
@@ -319,7 +334,9 @@ def remove_packages(context: Context) -> None:
 
     with complete_step(f"Removing {len(context.config.remove_packages)} packages…"):
         try:
-            context.config.distribution.remove_packages(context, context.config.remove_packages)
+            context.config.distribution.package_manager(context.config).remove(
+                context, context.config.remove_packages
+            )
         except NotImplementedError:
             die(f"Removing packages is not supported for {context.config.distribution}")
 
@@ -489,7 +506,12 @@ def setup_build_overlay(context: Context, volatile: bool = False) -> Iterator[No
         if volatile:
             context.lowerdirs = [d]
             context.upperdir = Path(
-                stack.enter_context(tempfile.TemporaryDirectory(prefix="volatile-overlay"))
+                stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="volatile-overlay.",
+                        dir=finalize_volatile_tmpdir(),
+                    )
+                )
             )
             os.chmod(context.upperdir, d.stat().st_mode)
         else:
@@ -1298,58 +1320,58 @@ def finalize_default_initrd(
     # Default values are assigned via the parser so we go via the argument parser to construct
     # the config for the initrd.
     cmdline = [
-        "--directory", "",
-        "--distribution", str(config.distribution),
-        "--release", config.release,
-        "--architecture", str(config.architecture),
-        *(["--mirror", config.mirror] if config.mirror else []),
-        "--repository-key-check", str(config.repository_key_check),
-        "--repository-key-fetch", str(config.repository_key_fetch),
+        "--directory=",
+        f"--distribution={config.distribution}",
+        f"--release={config.release}",
+        f"--architecture={config.architecture}",
+        *([f"--mirror={config.mirror}"] if config.mirror else []),
+        f"--repository-key-check={config.repository_key_check}",
+        f"--repository-key-fetch={config.repository_key_fetch}",
         *([f"--repositories={repository}" for repository in config.repositories]),
         *([f"--sandbox-tree={tree}" for tree in config.sandbox_trees]),
         # Note that when compress_output == Compression.none == 0 we don't pass --compress-output
         # which means the default compression will get picked. This is exactly what we want so that
         # initrds are always compressed.
-        *(["--compress-output", str(config.compress_output)] if config.compress_output else []),
-        "--compress-level", str(config.compress_level),
-        "--with-network", str(config.with_network),
-        "--cache-only", str(config.cacheonly),
-        *(["--output-directory", os.fspath(output_dir)] if output_dir else []),
-        *(["--workspace-directory", os.fspath(config.workspace_dir)] if config.workspace_dir else []),
-        *(["--cache-directory", os.fspath(config.cache_dir)] if config.cache_dir else []),
-        "--cache-key", config.cache_key or '-',
-        *(["--package-cache-directory", os.fspath(config.package_cache_dir)] if config.package_cache_dir else []),  # noqa: E501
-        *(["--local-mirror", str(config.local_mirror)] if config.local_mirror else []),
-        "--incremental", str(config.incremental),
+        *([f"--compress-output={c}"] if (c := config.compress_output) else []),
+        f"--compress-level={config.compress_level}",
+        f"--with-network={config.with_network}",
+        f"--cache-only={config.cacheonly}",
+        *([f"--output-directory={os.fspath(output_dir)}"] if output_dir else []),
+        *([f"--workspace-directory={os.fspath(config.workspace_dir)}"] if config.workspace_dir else []),
+        *([f"--cache-directory={os.fspath(config.cache_dir)}"] if config.cache_dir else []),
+        f"--cache-key={config.cache_key or '-'}",
+        *([f"--package-cache-directory={os.fspath(p)}"] if (p := config.package_cache_dir) else []),
+        *([f"--local-mirror={config.local_mirror}"] if config.local_mirror else []),
+        f"--incremental={config.incremental}",
         *(f"--profile={profile}" for profile in config.initrd_profiles),
         *(f"--package={package}" for package in config.initrd_packages),
         *(f"--volatile-package={package}" for package in config.initrd_volatile_packages),
         *(f"--package-directory={d}" for d in config.package_directories),
         *(f"--volatile-package-directory={d}" for d in config.volatile_package_directories),
-        "--output", "initrd",
-        *(["--image-id", config.image_id] if config.image_id else []),
-        *(["--image-version", config.image_version] if config.image_version else []),
+        "--output=initrd",
+        *([f"--image-id={config.image_id}"] if config.image_id else []),
+        *([f"--image-version={config.image_version}"] if config.image_version else []),
         *(
-            ["--source-date-epoch", str(config.source_date_epoch)]
+            [f"--source-date-epoch={config.source_date_epoch}"]
             if config.source_date_epoch is not None else
             []
         ),
-        *(["--locale", config.locale] if config.locale else []),
-        *(["--locale-messages", config.locale_messages] if config.locale_messages else []),
-        *(["--keymap", config.keymap] if config.keymap else []),
-        *(["--timezone", config.timezone] if config.timezone else []),
-        *(["--hostname", config.hostname] if config.hostname else []),
-        *(["--root-password", rootpwopt] if rootpwopt else []),
+        *([f"--locale={config.locale}"] if config.locale else []),
+        *([f"--locale-messages={config.locale_messages}"] if config.locale_messages else []),
+        *([f"--keymap={config.keymap}"] if config.keymap else []),
+        *([f"--timezone={config.timezone}"] if config.timezone else []),
+        *([f"--hostname={config.hostname}"] if config.hostname else []),
+        *([f"--root-password={rootpwopt}"] if rootpwopt else []),
         *([f"--environment={k}='{v}'" for k, v in config.environment.items()]),
-        *(["--tools-tree", os.fspath(config.tools_tree)] if config.tools_tree and tools else []),
-        "--tools-tree-certificates", str(config.tools_tree_certificates),
+        *([f"--tools-tree={os.fspath(config.tools_tree)}"] if config.tools_tree and tools else []),
+        f"--tools-tree-certificates={config.tools_tree_certificates}",
         *([f"--extra-search-path={os.fspath(p)}" for p in config.extra_search_paths]),
-        *(["--proxy-url", config.proxy_url] if config.proxy_url else []),
+        *([f"--proxy-url={config.proxy_url}"] if config.proxy_url else []),
         *([f"--proxy-exclude={host}" for host in config.proxy_exclude]),
-        *(["--proxy-peer-certificate", os.fspath(p)] if (p := config.proxy_peer_certificate) else []),
-        *(["--proxy-client-certificate", os.fspath(p)] if (p := config.proxy_client_certificate) else []),
-        *(["--proxy-client-key", os.fspath(p)] if (p := config.proxy_client_key) else []),
-        "--selinux-relabel", str(relabel),
+        *([f"--proxy-peer-certificate={os.fspath(p)}"] if (p := config.proxy_peer_certificate) else []),
+        *([f"--proxy-client-certificate={os.fspath(p)}"] if (p := config.proxy_client_certificate) else []),
+        *([f"--proxy-client-key={os.fspath(p)}"] if (p := config.proxy_client_key) else []),
+        f"--selinux-relabel={relabel}",
         "--include=mkosi-initrd",
     ]  # fmt: skip
 
@@ -3918,10 +3940,7 @@ def build_image(context: Context) -> None:
         check_root_populated(context)
         run_build_scripts(context)
 
-        if context.config.output_format == OutputFormat.none or (
-            context.args.run_build_scripts
-            and (context.config.output_dir_or_cwd() / context.config.output).exists()
-        ):
+        if context.config.output_format == OutputFormat.none or context.args.rerun_build_scripts:
             return
 
         if wantrepo:
@@ -4268,9 +4287,9 @@ def run_shell(args: Args, config: Config) -> None:
                     os.chown(addr, stat.st_uid, stat.st_gid)
                 stack.enter_context(start_journal_remote(config, sock.fileno()))
                 cmdline += [
-                    "--bind", f"{addr}:/run/host/journal/socket",
+                    f"--bind={addr}:/run/host/journal/socket",
                     "--set-credential=journal.forward_to_socket:/run/host/journal/socket",
-                ]  # fmt: skip
+                ]
 
         for p in config.unit_properties:
             cmdline += ["--property", p]
@@ -4502,35 +4521,35 @@ def finalize_default_tools(config: Config, *, resources: Path) -> Config:
         )
 
     cmdline = [
-        "--directory", "",
-        "--distribution", str(config.tools_tree_distribution),
-        *(["--release", config.tools_tree_release] if config.tools_tree_release else []),
+        "--directory=",
+        f"--distribution={config.tools_tree_distribution}",
+        *([f"--release={config.tools_tree_release}"] if config.tools_tree_release else []),
         *([f"--profile={profile}" for profile in config.tools_tree_profiles]),
-        *(["--mirror", config.tools_tree_mirror] if config.tools_tree_mirror else []),
+        *([f"--mirror={config.tools_tree_mirror}"] if config.tools_tree_mirror else []),
         *([f"--repositories={repository}" for repository in config.tools_tree_repositories]),
         *([f"--sandbox-tree={tree}" for tree in config.tools_tree_sandbox_trees]),
-        "--repository-key-check", str(config.repository_key_check),
-        "--repository-key-fetch", str(config.repository_key_fetch),
-        "--cache-only", str(config.cacheonly),
-        *(["--output-directory", os.fspath(config.output_dir)] if config.output_dir else []),
-        *(["--workspace-directory", os.fspath(config.workspace_dir)] if config.workspace_dir else []),
-        *(["--cache-directory", os.fspath(config.cache_dir)] if config.cache_dir else []),
+        f"--repository-key-check={config.repository_key_check}",
+        f"--repository-key-fetch={config.repository_key_fetch}",
+        f"--cache-only={config.cacheonly}",
+        *([f"--output-directory={os.fspath(p)}"] if (p := config.output_dir) else []),
+        *([f"--workspace-directory={os.fspath(p)}"] if (p := config.workspace_dir) else []),
+        *([f"--cache-directory={os.fspath(p)}"] if (p := config.cache_dir) else []),
         "--cache-key=tools",
-        *(["--package-cache-directory", os.fspath(config.package_cache_dir)] if config.package_cache_dir else []),  # noqa: E501
-        "--incremental", str(config.incremental),
+        *([f"--package-cache-directory={os.fspath(p)}"] if (p := config.package_cache_dir) else []),
+        f"--incremental={config.incremental}",
         *([f"--package={package}" for package in config.tools_tree_packages]),
         *([f"--package-directory={os.fspath(directory)}" for directory in config.tools_tree_package_directories]),  # noqa: E501
         *([f"--build-sources={tree}" for tree in config.build_sources]),
-        "--build-sources-ephemeral", str(config.build_sources_ephemeral),
+        f"--build-sources-ephemeral={config.build_sources_ephemeral}",
         *([f"--prepare-script={os.fspath(script)}" for script in config.tools_tree_prepare_scripts]),
         "--output=tools",
-        *(["--source-date-epoch", str(config.source_date_epoch)] if config.source_date_epoch is not None else []),  # noqa: E501
+        *([f"--source-date-epoch={e}"] if (e := config.source_date_epoch) is not None else []),
         *([f"--environment={k}='{v}'" for k, v in config.environment.items()]),
-        *(["--proxy-url", config.proxy_url] if config.proxy_url else []),
+        *([f"--proxy-url={config.proxy_url}"] if config.proxy_url else []),
         *([f"--proxy-exclude={host}" for host in config.proxy_exclude]),
-        *(["--proxy-peer-certificate", os.fspath(p)] if (p := config.proxy_peer_certificate) else []),
-        *(["--proxy-client-certificate", os.fspath(p)] if (p := config.proxy_client_certificate) else []),
-        *(["--proxy-client-key", os.fspath(p)] if (p := config.proxy_client_key) else []),
+        *([f"--proxy-peer-certificate={os.fspath(p)}"] if (p := config.proxy_peer_certificate) else []),
+        *([f"--proxy-client-certificate={os.fspath(p)}"] if (p := config.proxy_client_certificate) else []),
+        *([f"--proxy-client-key={os.fspath(p)}"] if (p := config.proxy_client_key) else []),
     ]  # fmt: skip
 
     _, [tools] = parse_config(
@@ -4881,12 +4900,11 @@ def run_build(
     metadata_dir: Path,
     package_dir: Optional[Path] = None,
 ) -> None:
-    if os.getuid() != 0:
+    if not have_effective_cap(CAP_SYS_ADMIN):
         acquire_privileges()
-
-    unshare(CLONE_NEWNS)
-
-    if os.getuid() == 0:
+        unshare(CLONE_NEWNS)
+    else:
+        unshare(CLONE_NEWNS)
         mount("", "/", "", MS_SLAVE | MS_REC, "")
 
     # For extra safety when running as root, remount a bunch of directories read-only unless the output
@@ -4962,7 +4980,7 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
 
     if args.verb == Verb.dependencies:
         _, [deps] = parse_config(
-            ["--directory", "", "--repositories", "", *args.cmdline, "--include=mkosi-tools", "build"],
+            ["--directory=", "--repositories=", *args.cmdline, "--include=mkosi-tools", "build"],
             resources=resources,
         )
 
@@ -5096,6 +5114,13 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
             Verb.sandbox: run_sandbox,
         }[args.verb](args, last)
 
+    if last.output_format == OutputFormat.none:
+        if args.verb != Verb.build:
+            die(f"Cannot run '{args.verb}' verb on image with output format 'none'")
+
+        if args.rerun_build_scripts:
+            die("Cannot use --run-build-scripts on image with output format 'none'")
+
     output = last.output_dir_or_cwd() / last.output_with_compression
 
     if (
@@ -5104,50 +5129,61 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
         and output.exists()
         and not output.is_symlink()
         and last.output_format != OutputFormat.none
-        and not args.run_build_scripts
+        and not args.rerun_build_scripts
     ):
         logging.info(f"Output path {output} exists already. (Use --force to rebuild.)")
         return
 
-    if args.verb.needs_build():
-        if args.verb != Verb.build and not args.force and not output.exists():
-            die(
-                f"Image '{last.image}' has not been built yet",
-                hint="Make sure to build the image first with 'mkosi build' or use '--force'",
-            )
+    if args.rerun_build_scripts and not output.exists():
+        die(
+            f"Image '{last.image}' must be built once before --rerun-build-scripts can be used",
+            hint="Build the image once with 'mkosi build'",
+        )
 
-        if not last.repart_offline and os.getuid() != 0:
-            die(f"Must be root to build {last.image} image configured with RepartOffline=no")
+    if args.verb != Verb.build and not args.force and not output.exists():
+        die(
+            f"Image '{last.image}' has not been built yet",
+            hint="Make sure to build the image first with 'mkosi build' or use '--force'",
+        )
 
-        check_workspace_directory(last)
+    if not last.repart_offline and os.getuid() != 0:
+        die(f"Must be root to build {last.image} image configured with RepartOffline=no")
 
-        if last.is_incremental():
-            for a, b in itertools.combinations(images, 2):
-                if a.expand_key_specifiers(a.cache_key) == b.expand_key_specifiers(b.cache_key):
-                    die(
-                        f"Image {a.image} and {b.image} have the same cache key '{a.expand_key_specifiers(a.cache_key)}'",  # noqa: E501
-                        hint="Add the &I specifier to the cache key to avoid this issue",
-                    )
+    check_workspace_directory(last)
 
-        if last.is_incremental() and last.incremental == Incremental.strict:
-            if args.force > 1:
+    if args.rerun_build_scripts and not last.is_incremental():
+        die("Incremental= must be enabled to be able to use --rerun-build-scripts")
+
+    if last.is_incremental():
+        for a, b in itertools.combinations(images, 2):
+            if a.expand_key_specifiers(a.cache_key) == b.expand_key_specifiers(b.cache_key):
                 die(
-                    "Cannot remove incremental caches when building with Incremental=strict",
-                    hint="Build once with '-i yes' to update the image cache",
+                    f"Image {a.image} and {b.image} have the same cache key '{a.expand_key_specifiers(a.cache_key)}'",  # noqa: E501
+                    hint="Add the &I specifier to the cache key to avoid this issue",
                 )
 
-            for config in images:
-                if have_cache(config):
-                    continue
+    if last.is_incremental() and (last.incremental == Incremental.strict or args.rerun_build_scripts):
+        if args.force > 1:
+            die(
+                "Cannot remove incremental caches when building with Incremental=strict",
+                hint="Build once with '-i yes' to update the image cache",
+            )
 
+        if any((c := config).is_incremental() and not have_cache(config) for config in images):
+            if args.rerun_build_scripts:
                 die(
-                    f"Strict incremental mode is enabled and cache for image {config.image} is out-of-date",
+                    f"Cannot use --rerun-build-scripts as the cache for image {c.image} is out-of-date",
+                    hint="Rebuild the image to update the image cache",
+                )
+            else:
+                die(
+                    f"Strict incremental mode is enabled and cache for image {c.image} is out-of-date",
                     hint="Build once with '-i yes' to update the image cache",
                 )
 
     # First, process all directory removals because otherwise if different images share directories
     # a later image build could end up deleting the output generated by an earlier image build.
-    if args.verb.needs_build() and (needs_build(args, last) or args.wipe_build_dir):
+    if needs_build(args, last) or args.wipe_build_dir:
         for config in images:
             run_clean(args, config)
 
@@ -5157,21 +5193,20 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
             if args.force > 1 or not have_cache(initrd):
                 remove_cache_entries(initrd)
 
-    for i, config in enumerate(images):
-        if args.verb != Verb.build:
-            check_tools(config, args.verb)
-
-        images[i] = config = run_configure_scripts(config)
-
-    # The images array has been modified so we need to reevaluate last again.
-    # Also ensure that all other images are reordered in case their dependencies were modified.
-    last = images[-1]
-
     if not have_history(args):
+        for i, config in enumerate(images):
+            if args.verb != Verb.build:
+                check_tools(config, args.verb)
+
+            images[i] = config = run_configure_scripts(config)
+
+        # The images array has been modified so we need to reevaluate last again.
+        # Also ensure that all other images are reordered in case their dependencies were modified.
+        last = images[-1]
         images = resolve_deps(images[:-1], last.dependencies) + [last]
 
     if (
-        args.run_build_scripts
+        args.rerun_build_scripts
         or last.output_format == OutputFormat.none
         or not (last.output_dir_or_cwd() / last.output).exists()
     ):
@@ -5223,7 +5258,7 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
                 # nothing to do so exit early.
                 if (
                     config.output_format == OutputFormat.none
-                    or (args.run_build_scripts and (config.output_dir_or_cwd() / config.output).exists())
+                    or (args.rerun_build_scripts and (config.output_dir_or_cwd() / config.output).exists())
                 ) and not config.build_scripts:
                     continue
 
@@ -5257,7 +5292,7 @@ def run_verb(args: Args, images: Sequence[Config], *, resources: Path) -> None:
         if args.auto_bump:
             bump_image_version()
 
-        if last.history:
+        if last.history and not args.rerun_build_scripts:
             Path(".mkosi-private/history").mkdir(parents=True, exist_ok=True)
             Path(".mkosi-private/history/latest.json").write_text(
                 json.dumps(

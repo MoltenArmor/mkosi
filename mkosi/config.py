@@ -156,6 +156,7 @@ class Drive:
     directory: Optional[Path]
     options: Optional[str]
     file_id: str
+    persist: bool
 
 
 # We use negative numbers for specifying special constants
@@ -602,6 +603,7 @@ class ToolsTreeProfile(StrEnum):
 
 class InitrdProfile(StrEnum):
     lvm = enum.auto()
+    raid = enum.auto()
 
 
 def expand_delayed_specifiers(specifiers: dict[str, str], text: str) -> str:
@@ -1059,12 +1061,23 @@ def config_make_enum_matcher(type: type[SE]) -> ConfigMatchCallback[SE]:
     return config_match_enum
 
 
+def package_sort_key(package: str) -> tuple[int, str]:
+    """Sorts packages: normal first, paths second, conditional third"""
+
+    if package.startswith("("):
+        return 2, package
+    elif package.startswith("/"):
+        return 1, package
+    return 0, package
+
+
 def config_make_list_parser(
     *,
     delimiter: Optional[str] = None,
     parse: Callable[[str], T] = str,  # type: ignore # see mypy#3737
     unescape: bool = False,
     reset: bool = True,
+    key: Optional[Callable[[T], Any]] = None,
 ) -> ConfigParseCallback[list[T]]:
     def config_parse_list(value: Optional[str], old: Optional[list[T]]) -> Optional[list[T]]:
         new = old.copy() if old else []
@@ -1089,7 +1102,12 @@ def config_make_list_parser(
             if reset and len(values) == 1 and values[0] == "":
                 return None
 
-        return new + [parse(v) for v in values if v]
+        new += [parse(v) for v in values if v]
+
+        if key:
+            new.sort(key=key)
+
+        return new
 
     return config_parse_list
 
@@ -1349,27 +1367,29 @@ def parse_profile(value: str) -> str:
 
 
 def parse_drive(value: str) -> Drive:
-    parts = value.split(":", maxsplit=4)
-    if not parts or not parts[0]:
+    parts = value.split(":")
+
+    if len(parts) > 6:
+        die(f"Too many components in drive '{value}")
+
+    if len(parts) < 1:
         die(f"No ID specified for drive '{value}'")
 
     if len(parts) < 2:
         die(f"Missing size in drive '{value}")
 
-    if len(parts) > 5:
-        die(f"Too many components in drive '{value}")
-
     id = parts[0]
     if not is_valid_filename(id):
         die(f"Unsupported path character in drive id '{id}'")
 
-    size = parse_bytes(parts[1])
-
-    directory = parse_path(parts[2]) if len(parts) > 2 and parts[2] else None
-    options = parts[3] if len(parts) > 3 and parts[3] else None
-    file_id = parts[4] if len(parts) > 4 and parts[4] else id
-
-    return Drive(id=id, size=size, directory=directory, options=options, file_id=file_id)
+    return Drive(
+        id=id,
+        size=parse_bytes(parts[1]),
+        directory=parse_path(p) if len(parts) > 2 and (p := parts[2]) else None,
+        options=p if len(parts) > 3 and (p := parts[3]) else None,
+        file_id=p if len(parts) > 4 and (p := parts[4]) else id,
+        persist=parse_boolean(p) if len(parts) > 5 and (p := parts[5]) else False,
+    )
 
 
 def config_parse_sector_size(value: Optional[str], old: Optional[int]) -> Optional[int]:
@@ -1680,7 +1700,7 @@ class Args:
     doc_format: DocFormat
     json: bool
     wipe_build_dir: bool
-    run_build_scripts: bool
+    rerun_build_scripts: bool
 
     @classmethod
     def default(cls) -> "Args":
@@ -2718,7 +2738,7 @@ SETTINGS: list[ConfigSetting[Any]] = [
         long="--package",
         metavar="PACKAGE",
         section="Content",
-        parse=config_make_list_parser(delimiter=","),
+        parse=config_make_list_parser(delimiter=",", key=package_sort_key),
         help="Add an additional package to the OS image",
     ),
     ConfigSetting(
@@ -2726,7 +2746,7 @@ SETTINGS: list[ConfigSetting[Any]] = [
         long="--build-package",
         metavar="PACKAGE",
         section="Content",
-        parse=config_make_list_parser(delimiter=","),
+        parse=config_make_list_parser(delimiter=",", key=package_sort_key),
         help="Additional packages needed for build scripts",
     ),
     ConfigSetting(
@@ -2734,7 +2754,7 @@ SETTINGS: list[ConfigSetting[Any]] = [
         long="--volatile-package",
         metavar="PACKAGE",
         section="Content",
-        parse=config_make_list_parser(delimiter=","),
+        parse=config_make_list_parser(delimiter=",", key=package_sort_key),
         help="Packages to install after executing build scripts",
     ),
     ConfigSetting(
@@ -4190,7 +4210,7 @@ def create_argument_parser(chdir: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "-R",
-        "--run-build-scripts",
+        "--rerun-build-scripts",
         help="Run build scripts even if the image is not rebuilt",
         action="store_true",
         default=False,
@@ -4561,11 +4581,10 @@ class ParseContext:
 
     def parse_config_one(self, path: Path, parse_profiles: bool = False, parse_local: bool = False) -> bool:
         s: Optional[ConfigSetting[object]]  # Hint to mypy that we might assign None
-        extras = path.is_dir()
-
         assert path.is_absolute()
 
-        if path.is_dir():
+        extras = path.is_dir()
+        if extras:
             path /= "mkosi.conf"
 
         if not self.match_config(path):
@@ -4573,10 +4592,10 @@ class ParseContext:
 
         if extras:
             if parse_local:
-                if (
-                    ((localpath := path.parent / "mkosi.local") / "mkosi.conf").exists()
-                    or (localpath := path.parent / "mkosi.local.conf").exists()
-                ):  # fmt: skip
+                for localpath in (
+                    *([p] if (p := path.parent / "mkosi.local").is_dir() else []),
+                    *([p] if (p := path.parent / "mkosi.local.conf").is_file() else []),
+                ):
                     with chdir(localpath if localpath.is_dir() else Path.cwd()):
                         self.parse_config_one(localpath if localpath.is_file() else Path.cwd())
 
@@ -4694,7 +4713,7 @@ def have_history(args: Args) -> bool:
     return (
         args.directory is not None
         and args.verb.needs_build()
-        and args.verb != Verb.build
+        and (args.verb != Verb.build or args.rerun_build_scripts)
         and not args.force
         and Path(".mkosi-private/history/latest.json").exists()
     )
@@ -4729,6 +4748,9 @@ def parse_config(
 
     if args.cmdline and not args.verb.supports_cmdline():
         die(f"Arguments after verb are not supported for {args.verb}.")
+
+    if args.rerun_build_scripts and args.force:
+        die("--force cannot be used together with --rerun-build-scripts")
 
     # If --debug was passed, apply it as soon as possible.
     if ARG_DEBUG.get():
@@ -5269,6 +5291,7 @@ def json_type_transformer(refcls: Union[type[Args], type[Config]]) -> Callable[[
                     directory=Path(d["Directory"]) if d.get("Directory") else None,
                     options=d.get("Options"),
                     file_id=d.get("FileId", d["Id"]),
+                    persist=d.get("Persist", False),
                 )
             )
 

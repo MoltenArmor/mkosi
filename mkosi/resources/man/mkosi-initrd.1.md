@@ -18,7 +18,7 @@ initrds and Unified Kernel Images for the current running system.
 
 # OPTIONS
 
-`--kernel-version=`
+`--kernel-version=`, `-k`
 :   Kernel version where to look for the kernel modules to include. Defaults to
     the kernel version of the running system (`uname -r`).
 
@@ -45,6 +45,7 @@ initrds and Unified Kernel Images for the current running system.
     disabled.
 
     The `lvm` profile enables support for LVM.
+    The `raid` profile enables support for RAID arrays.
 
 `--debug`
 :   Enable additional debugging output.

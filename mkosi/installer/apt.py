@@ -230,6 +230,38 @@ class Apt(PackageManager):
         )
 
     @classmethod
+    def install(
+        cls,
+        context: Context,
+        packages: Sequence[str],
+        *,
+        apivfs: bool = True,
+    ) -> None:
+        # Debian policy is to start daemons by default. The policy-rc.d script can be used choose which ones
+        # to start. Let's install one that denies all daemon startups.
+        # See https://people.debian.org/~hmh/invokerc.d-policyrc.d-specification.txt for more information.
+        # Note: despite writing in /usr/sbin, this file is not shipped by the OS and instead should be
+        # managed by the admin.
+        policyrcd = context.root / "usr/sbin/policy-rc.d"
+        with umask(~0o755):
+            policyrcd.parent.mkdir(parents=True, exist_ok=True)
+        with umask(~0o644):
+            policyrcd.write_text("#!/bin/sh\nexit 101\n")
+
+        cls.invoke(context, "install", packages, apivfs=apivfs)
+
+        policyrcd.unlink()
+
+        # systemd-gpt-auto-generator is disabled by default in Ubuntu:
+        # https://git.launchpad.net/ubuntu/+source/systemd/tree/debian/systemd.links?h=ubuntu/noble-proposed.
+        # Let's make sure it is enabled by default in our images.
+        (context.root / "etc/systemd/system-generators/systemd-gpt-auto-generator").unlink(missing_ok=True)
+
+    @classmethod
+    def remove(cls, context: Context, packages: Sequence[str]) -> None:
+        cls.invoke(context, "purge", packages, apivfs=True)
+
+    @classmethod
     def sync(cls, context: Context, force: bool) -> None:
         cls.invoke(context, "update")
 
@@ -280,6 +312,17 @@ class Apt(PackageManager):
                 Suites: mkosi
                 Components: main
                 Trusted: yes
+                """
+            )
+        )
+
+        (context.sandbox_tree / "etc/apt/preferences.d").mkdir(parents=True, exist_ok=True)
+        (context.sandbox_tree / "etc/apt/preferences.d/mkosi-local.pref").write_text(
+            textwrap.dedent(
+                """\
+                Package: *
+                Pin: origin mkosi
+                Pin-Priority: 1100
                 """
             )
         )

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
 from mkosi.config import Architecture, Config
 from mkosi.context import Context
@@ -41,6 +41,10 @@ class Installer(DistributionInstaller):
         return Distribution.fedora
 
     @classmethod
+    def major_release(cls, config: "Config") -> str:
+        return config.release.partition(".")[0]
+
+    @classmethod
     def package_manager(cls, config: "Config") -> type[PackageManager]:
         return Dnf
 
@@ -68,19 +72,13 @@ class Installer(DistributionInstaller):
         setup_rpm(context, dbpath=cls.dbpath(context))
 
         Dnf.setup(context, list(cls.repositories(context)))
-        (context.sandbox_tree / "etc/dnf/vars/stream").write_text(f"{context.config.release}-stream\n")
+        (context.sandbox_tree / "etc/dnf/vars/stream").write_text(
+            f"{cls.major_release(context.config)}-stream\n"
+        )
 
     @classmethod
     def install(cls, context: Context) -> None:
-        cls.install_packages(context, ["basesystem"], apivfs=False)
-
-    @classmethod
-    def install_packages(cls, context: Context, packages: Sequence[str], apivfs: bool = True) -> None:
-        Dnf.invoke(context, "install", packages, apivfs=apivfs)
-
-    @classmethod
-    def remove_packages(cls, context: Context, packages: Sequence[str]) -> None:
-        Dnf.invoke(context, "remove", packages, apivfs=True)
+        Dnf.install(context, ["basesystem"], apivfs=False)
 
     @classmethod
     def architecture(cls, arch: Architecture) -> str:
@@ -96,11 +94,11 @@ class Installer(DistributionInstaller):
 
         return a
 
-    @staticmethod
-    def gpgurls(context: Context) -> tuple[str, ...]:
+    @classmethod
+    def gpgurls(cls, context: Context) -> tuple[str, ...]:
         # First, start with the names of the appropriate keys in /etc/pki/rpm-gpg.
 
-        if context.config.release == "9":
+        if GenericVersion(context.config.release) == 9:
             rel = "RPM-GPG-KEY-centosofficial"
         else:
             rel = "RPM-GPG-KEY-centosofficial-SHA256"
@@ -109,7 +107,7 @@ class Installer(DistributionInstaller):
 
         # Next, follow up with the names of the appropriate keys in /usr/share/distribution-gpg-keys.
 
-        if context.config.release == "9":
+        if GenericVersion(context.config.release) == 9:
             rel = "RPM-GPG-KEY-CentOS-Official"
         else:
             rel = "RPM-GPG-KEY-CentOS-Official-SHA256"
@@ -215,11 +213,17 @@ class Installer(DistributionInstaller):
 
     @classmethod
     def epel_repositories(cls, context: Context) -> Iterable[RpmRepository]:
+        # Since EPEL 10, there's an associated minor release for every RHEL minor release.
+        if GenericVersion(context.config.release) >= 10:
+            release = context.config.release
+        else:
+            release = cls.major_release(context.config)
+
         gpgurls = (
             find_rpm_gpgkey(
                 context,
-                f"RPM-GPG-KEY-EPEL-{context.config.release}",
-                f"https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{context.config.release}",
+                f"RPM-GPG-KEY-EPEL-{cls.major_release(context.config)}",
+                f"https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{cls.major_release(context.config)}",
             ),
         )
 
@@ -232,7 +236,7 @@ class Installer(DistributionInstaller):
                 ("epel", "epel"),
                 ("epel-testing", "epel/testing"),
             ]
-            if int(context.config.release) < 10:
+            if GenericVersion(context.config.release) < 10:
                 repodirs += [
                     ("epel-next", "epel/next"),
                     ("epel-next-testing", "epel/testing/next"),
@@ -247,19 +251,19 @@ class Installer(DistributionInstaller):
                 )
                 yield RpmRepository(
                     repo,
-                    f"baseurl={url}/{dir}/$releasever/Everything/$basearch",
+                    f"baseurl={url}/{dir}/{release}/Everything/$basearch",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     f"{repo}-debuginfo",
-                    f"baseurl={url}/{dir}/$releasever/Everything/$basearch/debug",
+                    f"baseurl={url}/{dir}/{release}/Everything/$basearch/debug",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     f"{repo}-source",
-                    f"baseurl={url}/{dir}/$releasever/Everything/source/tree",
+                    f"baseurl={url}/{dir}/{release}/Everything/source/tree",
                     gpgurls,
                     enabled=False,
                 )
@@ -268,65 +272,65 @@ class Installer(DistributionInstaller):
 
             # epel-next does not exist anymore since EPEL 10.
             repos = ["epel"]
-            if int(context.config.release) < 10:
+            if GenericVersion(context.config.release) < 10:
                 repos += ["epel-next"]
 
             for repo in repos:
                 yield RpmRepository(
                     repo,
-                    f"{url}&repo={repo}-$releasever",
+                    f"{url}&repo={repo}-{release}",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     f"{repo}-debuginfo",
-                    f"{url}&repo={repo}-debug-$releasever",
+                    f"{url}&repo={repo}-debug-{release}",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     f"{repo}-source",
-                    f"{url}&repo={repo}-source-$releasever",
+                    f"{url}&repo={repo}-source-{release}",
                     gpgurls,
                     enabled=False,
                 )
 
             yield RpmRepository(
                 "epel-testing",
-                f"{url}&repo=testing-epel$releasever",
+                f"{url}&repo=testing-epel{release}",
                 gpgurls,
                 enabled=False,
             )
             yield RpmRepository(
                 "epel-testing-debuginfo",
-                f"{url}&repo=testing-debug-epel$releasever",
+                f"{url}&repo=testing-debug-epel{release}",
                 gpgurls,
                 enabled=False,
             )
             yield RpmRepository(
                 "epel-testing-source",
-                f"{url}&repo=testing-source-epel$releasever",
+                f"{url}&repo=testing-source-epel{release}",
                 gpgurls,
                 enabled=False,
             )
 
             # epel-next does not exist anymore since EPEL 10.
-            if int(context.config.release) < 10:
+            if GenericVersion(context.config.release) < 10:
                 yield RpmRepository(
                     "epel-next-testing",
-                    f"{url}&repo=epel-testing-next-$releasever",
+                    f"{url}&repo=epel-testing-next-{release}",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     "epel-next-testing-debuginfo",
-                    f"{url}&repo=epel-testing-next-debug-$releasever",
+                    f"{url}&repo=epel-testing-next-debug-{release}",
                     gpgurls,
                     enabled=False,
                 )
                 yield RpmRepository(
                     "epel-next-testing-source",
-                    f"{url}&repo=epel-testing-next-source-$releasever",
+                    f"{url}&repo=epel-testing-next-source-{release}",
                     gpgurls,
                     enabled=False,
                 )

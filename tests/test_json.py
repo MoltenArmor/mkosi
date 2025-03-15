@@ -67,7 +67,7 @@ def test_args(path: Optional[Path]) -> None:
             "GenkeyValidDays": "100",
             "Json": false,
             "Pager": true,
-            "RunBuildScripts": true,
+            "RerunBuildScripts": true,
             "Verb": "build",
             "WipeBuildDir": true
         }}
@@ -88,7 +88,7 @@ def test_args(path: Optional[Path]) -> None:
         genkey_valid_days="100",
         json=False,
         pager=True,
-        run_build_scripts=True,
+        rerun_build_scripts=True,
         verb=Verb.build,
         wipe_build_dir=True,
     )
@@ -156,6 +156,7 @@ def test_config() -> None:
                     "FileId": "red",
                     "Id": "abc",
                     "Options": "abc,qed",
+                    "Persist": false,
                     "Size": 200
                 },
                 {
@@ -163,6 +164,15 @@ def test_config() -> None:
                     "FileId": "wcd",
                     "Id": "abc",
                     "Options": "",
+                    "Persist": false,
+                    "Size": 200
+                },
+                {
+                    "Directory": null,
+                    "FileId": "bla",
+                    "Id": "abc",
+                    "Options": "",
+                    "Persist": true,
                     "Size": 200
                 }
             ],
@@ -470,7 +480,11 @@ def test_config() -> None:
         credentials={"credkey": "credval"},
         dependencies=["dep1"],
         distribution=Distribution.fedora,
-        drives=[Drive("abc", 200, Path("/foo/bar"), "abc,qed", "red"), Drive("abc", 200, None, "", "wcd")],
+        drives=[
+            Drive("abc", 200, Path("/foo/bar"), "abc,qed", "red", False),
+            Drive("abc", 200, None, "", "wcd", False),
+            Drive("abc", 200, None, "", "bla", True),
+        ],
         environment_files=[],
         environment={"foo": "foo", "BAR": "BAR", "Qux": "Qux"},
         ephemeral=True,
