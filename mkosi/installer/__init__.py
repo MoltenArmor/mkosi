@@ -195,7 +195,7 @@ def clean_package_manager_metadata(context: Context) -> None:
 
     for tool, paths in (
         ("rpm",      ["var/lib/rpm", "usr/lib/sysimage/rpm"]),
-        ("dnf5",     ["usr/lib/sysimage/libdnf5"]),
+        ("dnf5",     ["usr/lib/sysimage/libdnf5", "var/lib/dnf"]),
         ("dpkg",     ["var/lib/dpkg"]),
         (executable, [f"var/lib/{subdir}", f"var/cache/{subdir}"]),
     ):  # fmt: skip
